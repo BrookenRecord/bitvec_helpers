@@ -39,30 +39,68 @@ where
         self.bs.read_var(bits)
     }
 
+    /// Reads an unsigned Exp-Golomb value in `0..=u64::MAX`.
+    ///
+    /// Returns `InvalidData` after more than 64 prefix zeroes, or if a 64-zero
+    /// prefix has a nonzero suffix. Truncated input returns `UnexpectedEof`.
+    /// Input consumed before an error is not restored.
     #[inline(always)]
     pub fn read_ue(&mut self) -> io::Result<u64> {
-        self.bs.read_unary::<1>().and_then(|leading_zeroes| {
-            if leading_zeroes > 0 {
-                self.bs
-                    .read_var::<u64>(leading_zeroes)
-                    .map(|v| v + (1 << leading_zeroes) - 1)
-            } else {
-                Ok(0)
+        let mut leading_zeroes = 0;
+        while !self.bs.read_bit()? {
+            leading_zeroes += 1;
+            if leading_zeroes > 64 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "read_ue: prefix exceeds u64 range",
+                ));
             }
+        }
+
+        if leading_zeroes == 0 {
+            return Ok(0);
+        }
+
+        let suffix = self.bs.read_var::<u64>(leading_zeroes)?;
+        let base = if leading_zeroes == 64 {
+            u64::MAX
+        } else {
+            (1u64 << leading_zeroes) - 1
+        };
+
+        base.checked_add(suffix).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "read_ue: value exceeds u64 range",
+            )
         })
     }
 
+    /// Reads a signed Exp-Golomb value in `-i64::MAX..=i64::MAX` exactly.
+    ///
+    /// Returns `InvalidData` for unsigned code `u64::MAX`, whose positive
+    /// mapping exceeds `i64::MAX`, or for an invalid unsigned code. Truncated
+    /// input returns `UnexpectedEof`. Input consumed on error is not restored.
     #[inline(always)]
     pub fn read_se(&mut self) -> io::Result<i64> {
-        self.read_ue().map(|code_num| {
-            let m = ((code_num + 1) as f64 / 2.0).floor() as u64;
+        let code_num = self.read_ue()?;
+        let half = i64::try_from(code_num / 2).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "read_se: value exceeds i64 range",
+            )
+        })?;
 
-            if code_num % 2 == 0 {
-                -(m as i64)
-            } else {
-                m as i64
-            }
-        })
+        if code_num % 2 == 0 {
+            Ok(-half)
+        } else {
+            half.checked_add(1).ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "read_se: value exceeds i64 range",
+                )
+            })
+        }
     }
 
     #[inline(always)]

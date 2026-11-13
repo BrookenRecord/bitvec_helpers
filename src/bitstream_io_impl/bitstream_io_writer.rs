@@ -2,8 +2,6 @@ use std::io;
 
 use bitstream_io::{BigEndian, BitWrite, BitWriter, Integer};
 
-use crate::signed_to_unsigned;
-
 pub struct BitstreamIoWriter(BitWriter<Vec<u8>, BigEndian>);
 
 impl BitstreamIoWriter {
@@ -33,30 +31,44 @@ impl BitstreamIoWriter {
         self.0.write_var(bits, value)
     }
 
+    /// Writes an unsigned Exp-Golomb value in `0..=u64::MAX`.
+    /// The maximum value uses 64 prefix zeroes and a zero 64-bit suffix.
     #[inline(always)]
     pub fn write_ue(&mut self, v: u64) -> io::Result<()> {
-        if v == 0 {
-            self.write_bit(true)
-        } else {
-            let mut tmp = v + 1;
-            let mut leading_zeroes: i64 = -1;
-
-            while tmp > 0 {
-                tmp >>= 1;
-                leading_zeroes += 1;
-            }
-
-            let leading_zeroes = leading_zeroes as u32;
+        if let Some(code_num) = v.checked_add(1) {
+            let leading_zeroes = 63 - code_num.leading_zeros();
             self.0.write_unary::<1>(leading_zeroes)?;
 
-            let remaining = v + 1 - (1 << leading_zeroes);
+            let remaining = code_num - (1u64 << leading_zeroes);
             self.write_var(leading_zeroes, remaining)
+        } else {
+            self.0.write_unary::<1>(64)?;
+            self.write_var(64, 0u64)
         }
     }
 
+    /// Writes a signed Exp-Golomb value in `-i64::MAX..=i64::MAX`.
+    /// Returns `InvalidInput` for `i64::MIN` without changing the output.
     #[inline(always)]
     pub fn write_se(&mut self, v: i64) -> io::Result<()> {
-        self.write_ue(signed_to_unsigned(v))
+        let code_num = v
+            .unsigned_abs()
+            .checked_mul(2)
+            .and_then(|value| {
+                if v > 0 {
+                    value.checked_sub(1)
+                } else {
+                    Some(value)
+                }
+            })
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "write_se: value exceeds signed domain",
+                )
+            })?;
+
+        self.write_ue(code_num)
     }
 
     #[inline(always)]
